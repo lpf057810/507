@@ -19,7 +19,8 @@ pacman::p_load(
   mice,
   car,
   stats,
-  sjPlot
+  sjPlot,
+  here
 )
 ```
 
@@ -38,7 +39,12 @@ opts_chunk$set(
 ## Deal with missing value
 
 ```{r}
-data<-read.csv("C:/Users/pengfei lou/Desktop/homework/2024-1/applied linear regression/pregnancy.csv")
+here::i_am(
+  "507.Rmd"
+)
+
+file_path<-here::here("data/pregnancy.csv")
+data<-read.csv(file_path,header = TRUE)
 na_counts<-colSums(is.na(data))
 print(na_counts)
 ```
