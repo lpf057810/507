@@ -1,0 +1,1090 @@
+---
+title: "Final report"
+author: "Pengfei Lou"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r,warning=FALSE}
+pacman::p_load(
+  ggplot2,
+  tibble,
+  dplyr,
+  lmtest,
+  knitr,
+  gtsummary,
+  caret,
+  pROC,
+  MASS,
+  mice,
+  car,
+  stats,
+  sjPlot
+)
+```
+
+```{r, echo = FALSE}
+
+opts_chunk$set(
+  echo=TRUE,
+  warning=FALSE,
+  message=FALSE
+)
+
+```
+
+# Aim 1
+
+## Deal with missing value
+
+```{r}
+data<-read.csv("C:/Users/pengfei lou/Desktop/homework/2024-1/applied linear regression/pregnancy.csv")
+na_counts<-colSums(is.na(data))
+print(na_counts)
+```
+
+
+```{r}
+data$mstatus[is.na(data$mstatus)]<-6
+data$mstatus<-factor(data$mstatus,levels = c("0","1","2","3","4","5","6"))
+
+data<-mice(data,m=5,method = "pmm",seed = 123)
+
+#plot(data)
+
+data <- complete(data, 1)
+na_counts<-colSums(is.na(data))
+print(na_counts)
+```
+
+The missing value mainly exist in the mstatus variable representing the meaning of 'don't know'. Thus, NA in mstatus shouldn't be deleted. Instead, "6" is assigned to replace the 'don't know'. The missing value in the wt is inserted by mean value.
+
+
+## EDA Analysis
+
+```{r}
+data <- data %>%
+  mutate(
+    hb_dl = hb / 10,
+    anemia = ifelse(hb_dl < 12, 1, 0),
+    BMI = wt / (ht / 100)^2
+  ) %>%
+  dplyr::select(-ht, -wt, -hb, -hb_dl) 
+
+table<-data%>%
+  tbl_summary(by = anemia)
+table
+```
+
+The summary table is divided by No anemia(0) and anemia(1). There is imbalance existing in outcome(Aim 3). Thus, upsampling is used.
+
+## Data scaling
+
+```{r}
+boxplot(data, main = "Boxplot for Identifying Outliers")
+```
+
+```{r}
+data$crp <- log(data$crp+1)
+data$sf <- log(data$sf+1)
+data$sfo <- log(data$sfo+1)
+data$si<-log(data$si+1)
+data$vitb12<-log(data$vitb12+1)
+data$age_yr<-log(data$age_yr+1)
+data$gagewks<-log(data$gagewks+1)
+data$BMI<-log(data$BMI+1)
+```
+
+
+## Upsampling
+
+```{r}
+data_anemia<-data%>%
+  filter(anemia==1)
+data_no_anemia<-data%>%
+  filter(anemia==0)
+
+times<-nrow(data_no_anemia)/nrow(data_anemia)
+
+data_anemia_upsampled<-data_anemia[rep(1:nrow(data_anemia),each=ceiling(times)),]
+
+data_balanced<-rbind(data_anemia_upsampled,data_no_anemia)
+
+table(data_balanced$anemia)
+
+summary(data)
+summary(data_balanced)
+```
+
+
+
+```{r}
+
+micronutrients <- c("sf", "sfo", "si", "vitb12")
+
+for(micronutrient in micronutrients) {
+  model <- lm(as.formula(paste(micronutrient, "~ crp")), data = data)
+  cat("\n","Analyzing", micronutrient, "\n")
+  term <- c("crp")
+  for(term in term) {
+    if (summary(model)$coefficients[term, "Pr(>|t|)"] < 0.05){
+      print(summary(model))
+      
+      cat(term, "is significant for", micronutrient, "\n")
+    }
+    else{
+      cat(term,"is not significant for",micronutrient, "\n")
+      }
+  }
+}
+
+```
+
+CRP is significant for si and vitb12.
+
+```{r}
+# Define predictor variables and covariates
+micronutrients <- c("sf", "sfo", "si", "vitb12")  # Dependent variables
+covariates <- c("age_yr", "gagewks", "trimester")  # Independent variables
+predictor <- "crp"  # Main independent variable
+
+# Function to construct model formulae
+build_formula <- function(response, predictor, covars) {
+  paste(response, "~", predictor, "+", paste(covars, collapse = " + "))
+}
+
+# Initialize a list to store models
+model_results <- list()
+
+# Fit models for each micronutrient with varying covariate combinations
+for (micro in micronutrients) {
+  covariate_combinations <- unlist(lapply(1:length(covariates), function(n) combn(covariates, n, simplify = FALSE)), recursive = FALSE)
+  for (cov_combination in covariate_combinations) {
+    formula <- build_formula(micro, predictor, cov_combination)
+    model <- try(lm(formula, data = data), silent = TRUE)
+    if (!inherits(model, "try-error") && "lm" %in% class(model)) {
+      model_results[[formula]] <- model  # Store the model itself
+    } else {
+      warning(paste("Model fitting failed or model not valid for formula:", formula))
+      model_results[[formula]] <- NULL
+    }
+  }
+}
+
+# Print results and conclusions for each model
+for (formula in names(model_results)) {
+  cat("\nModel:", formula, "\n")
+  model <- model_results[[formula]]
+  if (!is.null(model) && "lm" %in% class(model)) {
+    result <- summary(model)
+    #print(result$coefficients)
+    cat("Residual Standard Error:", result$sigma, "\n")
+    cat("Multiple R-squared:", result$r.squared, "\n")
+    cat("Adjusted R-squared:", result$adj.r.squared, "\n")
+    cat("AIC:", AIC(model), "\n")  # Calculate AIC using the model object
+
+    # Conclusions based on p-values and R-squared
+    significant_predictors <- summary(model)$coefficients[,4] < 0.05
+    if (any(significant_predictors)) {
+      cat("Conclusion: The model shows significant predictors.\n")
+    } else {
+      cat("Conclusion: No significant predictors found.\n")
+    }
+  } else {
+    cat("Model fitting failed or returned NULL.\n")
+  }
+}
+
+```
+
+sf~crp: The existence of maternal age and/or gestational age (or pregnancy trimester) has a positive contribution to the association.
+
+sfo~crp: The existence of maternal age and/or gestational age (or pregnancy trimester) has a positive contribution to the association.
+
+si~crp: The existence of maternal age and/or gestational age (or pregnancy trimester) has a positive contribution to the association.
+
+vitb12~crp: The existence of maternal age and/or gestational age (or pregnancy trimester)  has a positive contribution to the association.
+
+## Two way interaction
+
+### One interaction
+
+```{r}
+micronutrients <- c("sf", "sfo", "si", "vitb12")
+
+for(micronutrient in micronutrients) {
+  cat("\nAnalyzing", micronutrient, "\n")
+
+  # Define the base model with no interactions
+  model <- lm(as.formula(paste(micronutrient, "~ crp + age_yr + gagewks + trimester")), data = data)
+
+  # Define models with individual interactions
+  interaction_terms <- c("crp:age_yr", "crp:gagewks", "crp:trimester")
+  models_with_interactions <- list(
+    age_interaction = lm(as.formula(paste(micronutrient, "~ crp + age_yr + gagewks + trimester +", interaction_terms[1])), data = data),
+    gagewks_interaction = lm(as.formula(paste(micronutrient, "~ crp + age_yr + gagewks + trimester +", interaction_terms[2])), data = data),
+    trimester_interaction = lm(as.formula(paste(micronutrient, "~ crp + age_yr + gagewks + trimester +", interaction_terms[3])), data = data)
+  )
+
+  # Check each model for significance of interactions
+  for (i in seq_along(models_with_interactions)) {
+    model <- models_with_interactions[[i]]
+    interaction_term <- interaction_terms[i]
+    summary_model <- summary(model)
+    print(summary_model)
+    p_value <- coef(summary_model)[interaction_term, "Pr(>|t|)"]
+
+    if (!is.na(p_value) && p_value < 0.05) {
+      print(summary_model)
+      cat(interaction_term, "interaction is significant for", micronutrient, "\n")
+    } else {
+      cat(interaction_term, "interaction is not significant for", micronutrient, "\n")
+    }
+  }
+}
+
+```
+### Two interactions
+
+```{r,warning=FALSE}
+# Define the base predictor and covariates
+predictor <- "crp"
+covariates <- c("age_yr", "gagewks", "trimester")
+micronutrients <- c("sf", "sfo", "si", "vitb12")
+
+# Create all possible pairs of interaction terms
+interaction_terms <- c(paste(predictor, covariates[1], sep=":"), paste(predictor, covariates[2], sep=":"), paste(predictor, covariates[3], sep=":"))
+interaction_pairs <- combn(interaction_terms, 2, simplify = FALSE)
+
+# Build and evaluate models for each micronutrient and each pair of interaction terms
+results <- list()
+for (micronutrient in micronutrients) {
+    results[[micronutrient]] <- list()
+    cat("\nAnalyzing", micronutrient, "\n")
+    
+    for (pair in interaction_pairs) {
+        interaction_formula <- paste(micronutrient, "~", predictor, "+", paste(covariates, collapse = "+"), "+", paste(pair, collapse = "+"))
+        model <- lm(as.formula(interaction_formula), data = data)
+        summary_model <- summary(model)
+        
+        # Store model summary
+        results[[micronutrient]][paste(pair, collapse=" & ")] <- summary_model
+        
+        # Output the model's summary
+        cat("\nModel with interactions", paste(pair, collapse=" and "), ":\n")
+        print(summary_model)
+        
+        # Check if interactions are significant
+        p_values <- sapply(pair, function(x) summary_model$coefficients[x, "Pr(>|t|)"])
+        significant <- all(p_values < 0.05)
+        if (significant) {
+            cat("Both interactions", paste(pair, collapse=" and "), "are significant for", micronutrient, "\n")
+        } else {
+            cat("No interactions are significant for", micronutrient, "\n")
+        }
+    }
+}
+
+```
+
+Both interactions crp:gagewks and crp:trimester are significant for vitb12.
+
+### Three interactions
+
+```{r}
+
+micronutrients <- c("sf", "sfo", "si", "vitb12")
+
+for(micronutrient in micronutrients) {
+  cat("Analyzing", micronutrient, "\n")
+  model_no_interaction <- lm(as.formula(paste(micronutrient, "~ crp+age_yr+trimester+gagewks")), data = data)
+  model_interaction <- lm(as.formula(paste(micronutrient, "~ crp + age_yr + gagewks + trimester + crp:age_yr + crp:gagewks + crp:trimester")), data = data)
+  interaction_terms <- c("crp:age_yr", "crp:gagewks","crp:trimester")
+  for(term in interaction_terms) {
+    if (summary(model_interaction)$coefficients[term, "Pr(>|t|)"] < 0.05){
+      print(summary(model_interaction))
+      cat(term, "interaction is significant for", micronutrient, "\n")
+      
+    }
+    else{
+      cat(term,"interaction is not significant for",micronutrient, "\n")
+      }
+      
+    }
+  }
+#interaction_plot <- ggplot(data_scaled, aes(x=crp, y=sfo, color=factor(gagewks),group=factor(gagewks))) +
+                #geom_point() +
+                #geom_smooth(method="lm", se=TRUE) +
+                #labs(title=paste("Interaction of CRP and gagewks on sfo"))
+            #print(interaction_plot)
+            
+#interaction_plot <- ggplot(data_scaled, aes(x=crp, y=sfo, color=factor(trimester),group=factor(trimester))) +
+                #geom_point() +
+                #geom_smooth(method="lm", se=TRUE) +
+                #labs(title=paste("Interaction of CRP and trimester on sfo"))
+            #print(interaction_plot)
+
+
+```
+
+After considering the interaction among maternal age, gestational age, pregnancy trimester and CRP, only the interaction among CRP,pregnancy trimester and gestational age is significant for vitb12 when three interactions all exist.
+
+### Explore more interations among age_yr, gagewks and trimester
+
+```{r}
+micronutrients <- c("sf", "sfo", "si", "vitb12")
+
+for(micronutrient in micronutrients) {
+    cat("Analyzing", micronutrient, "\n")
+    model_interaction <- lm(as.formula(paste(micronutrient, "~ crp + age_yr + gagewks + trimester + age_yr:crp + age_yr:gagewks + age_yr:trimester")),data=data)
+    summary_interaction<-summary(model_interaction)
+    interaction_terms <- c("crp:age_yr", "age_yr:gagewks", "age_yr:trimester")
+    significant_found <- FALSE
+
+    for(term in interaction_terms) {
+        p_value <- summary(model_interaction)$coefficients[term, "Pr(>|t|)"]
+        if (!is.na(p_value) && p_value < 0.05) {
+            if (!significant_found) {  # Print the model summary only once if there's at least one significant interaction
+                print(summary_interaction)
+                significant_found <- TRUE
+            }
+            cat(term, "interaction is significant for", micronutrient, "\n")
+        } else {
+            cat(term, "interaction is not significant for", micronutrient, "\n")
+        }
+    }
+  
+    cat("\n") 
+}
+
+
+```
+
+
+```{r}
+
+data$age_group <- cut(data$age_yr,
+                      breaks = c(15, 20, 30, 41), 
+                      labels = c("16-20", "21-30", "31-41"),
+                      include.lowest = TRUE)
+# List of micronutrient variables to iterate over
+micronutrients <- c("sf", "sfo", "si", "vitb12")
+
+# Loop through each micronutrient
+for(micronutrient in micronutrients) {
+    cat("Analyzing", micronutrient, "\n")
+  
+    # Model with interaction
+    model_interaction <- lm(as.formula(paste(micronutrient, "~ crp + age_yr + gagewks + trimester + gagewks:crp + gagewks:age_yr + gagewks:trimester")),data=data)
+    summary_interaction<-summary(model_interaction)
+    # Check for significant interactions and visualize if necessary
+    interaction_terms <- c("crp:gagewks", "age_yr:gagewks", "gagewks:trimester")
+    significant_found <- FALSE
+
+    for(term in interaction_terms) {
+        p_value <- summary(model_interaction)$coefficients[term, "Pr(>|t|)"]
+        if (!is.na(p_value) && p_value < 0.05) {
+            if (!significant_found) {  # Print the model summary only once if there's at least one significant interaction
+                print(summary_interaction)
+                significant_found <- TRUE
+            }
+            cat(term, "interaction is significant for", micronutrient, "\n")
+            
+        } else {
+            cat(term, "interaction is not significant for", micronutrient, "\n")
+        }
+    }
+  
+    cat("\n") 
+}
+
+#interaction_plot <- ggplot(data_scaled, aes(x=gagewks, y=sf, color=factor(age_group),group=factor(age_group))) +
+                #geom_point() +
+                #geom_smooth(method="lm", se=TRUE) +
+                #labs(title=paste("Interaction of age and gagewks on sf"))
+            #print(interaction_plot)
+```
+gagewks:trimester interaction is significant for sf and vitb12.
+
+```{r}
+# List of micronutrient variables to iterate over
+micronutrients <- c("sf", "sfo", "si", "vitb12")
+
+# Loop through each micronutrient
+for(micronutrient in micronutrients) {
+    cat("Analyzing", micronutrient, "\n")
+  
+    # Model with interaction
+    model_interaction <- lm(as.formula(paste(micronutrient, "~ crp + age_yr + gagewks + trimester + trimester:crp + trimester:age_yr + trimester:gagewks")),data=data)
+    
+    # Check for significant interactions and visualize if necessary
+    interaction_terms <- c("crp:trimester", "age_yr:trimester", "gagewks:trimester")
+    significant_found <- FALSE
+
+    for(term in interaction_terms) {
+        p_value <- summary(model_interaction)$coefficients[term, "Pr(>|t|)"]
+        if (!is.na(p_value) && p_value < 0.05) {
+            if (!significant_found) {  # Print the model summary only once if there's at least one significant interaction
+                print(summary_interaction)
+                significant_found <- TRUE
+            }
+            cat(term, "interaction is significant for", micronutrient, "\n")
+            
+           
+        } else {
+            cat(term, "interaction is not significant for", micronutrient, "\n")
+        }
+    }
+  
+    cat("\n") 
+}
+
+```
+gagewks:trimester interaction is significant for sf and vitb12
+
+```{r}
+micronutrients <- c("sf", "sfo", "si", "vitb12")
+for(micronutrient in micronutrients) {
+  cat("Analyzing", micronutrient, "\n")
+  
+  formula_interaction <- as.formula(paste(micronutrient, "~ crp * age_yr * gagewks * trimester"))
+  model_interaction <- lm(formula_interaction, data = data)
+
+  model_summary <- summary(model_interaction)
+
+  interaction_terms <- names(coef(model_summary))[grepl(":", names(coef(model_summary)))]
+  
+  significant_interactions <- c()
+  
+  for(term in interaction_terms) {
+    p_value <- coef(model_summary)[term, "Pr(>|t|)"]
+    if (!is.na(p_value) && p_value < 0.05) {
+      significant_interactions <- c(significant_interactions, term)
+      cat(term, "interaction is significant for", micronutrient, "\n")
+    }
+  }
+  
+  if (length(significant_interactions) > 0) {
+    print(model_summary)
+    for(term in significant_interactions) {
+
+      vars <- unlist(strsplit(term, ":"))
+    }
+  } else {
+    cat("No significant interactions found for", micronutrient, "\n")
+  }
+  
+  cat("\n") 
+}
+
+```
+If conducting high level interaction like three way, four way interaction will lead to no significant interactions. Maybe machine fail to detect the difference due to the complicated conditions.
+
+## Odds ratio and CI
+
+```{r}
+model<-lm(si~crp + age_yr + gagewks + trimester + age_yr:crp + age_yr:gagewks + age_yr:trimester,data=data)
+tab_model(model)
+```
+
+
+## Model diagnostics
+
+```{r}
+model<-lm(si~crp + age_yr + gagewks + trimester  + crp:gagewks + crp:trimester+crp:age_yr,data=data)
+summary(model)
+res_fit_data<-tibble(
+  residuals=model$residuals,
+  fitted=model$fitted.values
+)
+
+res_fit_plot<- res_fit_data %>%
+  ggplot(aes(x=fitted,y=residuals))+
+  geom_point()+
+  geom_hline(yintercept = 0,color="red")
+res_fit_plot
+dwtest(model)
+
+qqnorm(residuals(model))
+qqline(residuals(model))
+
+shapiro.test(residuals(model))
+
+```
+
+```{r}
+diffits_model <- dffits(model)
+cd_model <- cooks.distance(model)
+dfbetas_model <- dfbetas(model)
+
+combined_measures <- cbind(diffits_model, cd_model, dfbetas_model)
+
+coefficient_names <- names(coef(model))
+dfbetas_names <- paste0("dfbetas_", coefficient_names)
+
+colnames(combined_measures) <- c("DFFITS", "Cooks Dist", dfbetas_names)
+
+#combined_measures
+```
+
+```{r}
+cd_model <- cooks.distance(model)
+
+# Plot Cook's distances
+plot(cd_model, type="h", main="Cook's distance", ylab="Cook's distance", xlab="Index")
+abline(h = 4/(nrow(data)-length(model$coefficients)), col="red")  # Rule-of-thumb threshold line
+
+
+```
+
+
+```{r}
+vif_values<-vif(model)
+print(vif_values)
+
+```
+
+
+**Linearity**: There is no systematic pattern in the Residual vs Fitted plot. No nonlinearity will be found.
+
+**Homoscedasticity**: There is no systematic pattern in the Residual vs Fitted plot. No homoscedasticity will be found.
+
+**Independence of errors**: The Residual vs Fitted plot and Durbin-Watson (DW) test show that the assumption of independence of errors is met.
+
+The Durbin-Watson (DW) test gives a DW statistic of  1.4214 with a p-value of 4.2e-14. 
+
+The DW statistic ranges from 0 to 4, where:
+  - A value around 2 suggests no autocorrelation.
+  - A value significantly less than 2 suggests positive autocorrelation.
+  - A value significantly greater than 2 suggests negative autocorrelation.
+
+The DW statistic  is less than 2, which suggests the presence of positive autocorrelation.
+
+A low p-value indicates that there is  enough evidence to reject the null hypothesis of no autocorrelation. 
+
+In summary, based on the Durbin-Watson test result,  there is  significant autocorrelation in the residuals of the model. This suggests that the assumption of independence of errors is not met.
+
+**Normality of residuals**: The QQplot shows most of the point fall on a 45 degree line except for both ends. Thus,Shapiro-Wilk normality test is used to see further.
+
+The value of W = 0.90177 indicates the test statistic from the Shapiro-Wilk test. The value which is more closer to 1 indicates  how close the residuals are to the normal distribution. A value of 1 would indicate a perfect normal distribution.
+  
+The p-value < 2.2e-16 indicates the null hypothesis (that the data is normally distributed) is not true.
+
+Therefore, the Q-Q plot alongside the Shapiro-Wilk test result show the residuals is not normally distributed.
+
+
+**Multicollinearity**: VIF function shows there is  multicollinearity.
+
+**DFFITS,Cook's Distance,DFBETAS**: There are no potentially problematic observations to determine if they are exerting on overall strong influence on the fitted regression model.
+
+I conduct a overall t test showing the pvalue < 0.05 which means the model is statistically significant.
+
+
+# Aim 2
+
+```{r,echo=FALSE,include=FALSE}
+data<-read.csv("C:/Users/pengfei lou/Desktop/homework/2024-1/applied linear regression/pregnancy.csv")
+
+data$mstatus[is.na(data$mstatus)]<-6
+data$mstatus<-factor(data$mstatus,levels = c("0","1","2","3","4","5","6"))
+
+data<-mice(data,m=5,method = "pmm",seed = 123)
+
+data <- complete(data, 1)
+data_balanced$mstatus<-factor(data_balanced$mstatus)
+data_balanced$tpreg<-factor(data_balanced$tpreg)
+
+data <- data %>%
+  mutate(
+    hb_dl = hb / 10,
+    anemia = ifelse(hb_dl < 12, 1, 0),
+    BMI = wt / (ht / 100)^2
+  ) %>%
+  dplyr::select(-ht, -wt, -hb, -hb_dl) 
+
+data$crp <- log(data$crp+1)
+data$sf <- log(data$sf+1)
+data$sfo <- log(data$sfo+1)
+data$si<-log(data$si+1)
+data$vitb12<-log(data$vitb12+1)
+data$age_yr<-log(data$age_yr+1)
+data$gagewks<-log(data$gagewks+1)
+data$BMI<-log(data$BMI+1)
+
+```
+
+## CRP and  micronutrients 
+```{r}
+
+# Ensure the outcome variable 'anemia' is a factor with appropriate levels if it's binary
+data$anemia <- factor(data$anemia, levels = c(0, 1))
+
+# Define the array of micronutrients that you are interested in analyzing
+micronutrients <- c("sf", "sfo", "si", "vitb12")
+
+# Function to build a logistic regression model for a given micronutrient
+build_model <- function(micronutrient, data_balanced) {
+    formula <- as.formula(paste("anemia ~ crp+", micronutrient))
+    model <- glm(formula, family = binomial(link = "logit"), data = data_balanced)
+    return(model)
+}
+
+# Initialize a list to store the model summaries
+results <- list()
+model_summaries <- list()
+
+# Loop through each micronutrient to build models and collect summaries
+for (micronutrient in micronutrients) {
+    cat("\nAnalyzing", micronutrient, "combined with CRP:\n")
+    model <- build_model(micronutrient, data_balanced)
+    summary_model <- summary(model)
+    results[[micronutrient]] <- model
+    model_summaries[[micronutrient]] <- summary_model
+    
+    # Print the summary to the console
+    print(summary_model)
+    
+    # Optionally, show only the coefficients part
+    cat("\nCoefficients for", micronutrient, ":\n")
+    print(coef(summary_model))
+}
+
+# Comparing models based on AIC values
+aic_values <- sapply(results, AIC)
+cat("\nAIC values for models:\n")
+print(aic_values)
+
+
+for (micronutrient in micronutrients) {
+    coef_df <- as.data.frame(coef(summary(results[[micronutrient]])))
+    plot <- ggplot(coef_df, aes(x = reorder(rownames(coef_df), Estimate), y = Estimate, fill = Estimate < 0)) +
+            geom_bar(stat = "identity") +
+            coord_flip() +
+            labs(title = paste("Effect sizes for", micronutrient), x = "Terms", y = "Coefficient Estimate") +
+            theme_minimal()
+    print(plot) 
+}
+
+```
+
+## Interaction
+```{r}
+data$anemia <- factor(data$anemia, levels = c(0, 1))
+# Define the array of micronutrients and other covariates
+micronutrients <- c("sf", "sfo", "si", "vitb12")
+covariates <- c("age_yr", "BMI", "trimester", "gagewks")  # Clinical and demographic covariates
+
+# Function to generate model formulas including interactions
+generate_formula <- function(micronutrient) {
+    main_effects <- paste(c("crp", micronutrient, covariates), collapse = " + ")
+    interactions <- paste("crp", c(micronutrient, covariates), sep=":", collapse = " + ")
+    full_formula <- paste("anemia ~", main_effects, "+", interactions)
+    return(as.formula(full_formula))
+}
+
+# Loop through each micronutrient, build models, and store results
+results <- list()
+
+for (micronutrient in micronutrients) {
+    cat("\nAnalyzing", micronutrient, "\n")
+    
+    # Generate the formula for the current micronutrient
+    formula <- generate_formula(micronutrient)
+    
+    # Build the logistic regression model using binomial family
+    model <- glm(formula, family = binomial(link = "logit"), data = data)
+    
+    # Store the model summary
+    results[[micronutrient]] <- summary(model)
+    
+    # Print the summary to the console
+    print(results[[micronutrient]])
+}
+
+# Evaluate and display significant interactions
+for (micronutrient in micronutrients) {
+    cat("\nResults for", micronutrient, ":\n")
+    coef_summary <- coef(results[[micronutrient]])
+    significant_interactions <- coef_summary[grepl("crp:", rownames(coef_summary)), "Pr(>|z|)"] < 0.05
+    
+    if (any(significant_interactions)) {
+        cat("Significant interactions found for", micronutrient, ":\n")
+        print(coef_summary[significant_interactions, , drop = FALSE])
+    } else {
+        cat("No significant interactions found for", micronutrient, "\n")
+    }
+}
+
+# Visualize significant interactions if any
+for (micronutrient in micronutrients) {
+    if (any(results[[micronutrient]]$coefficients[grepl("crp:", names(results[[micronutrient]]$coefficients)), "Pr(>|z|)"] < 0.05)) {
+        ggplot(data, aes_string(x = "crp", y = micronutrient, color = "factor(anemia)")) +
+        geom_point(alpha = 0.5) +
+        geom_smooth(method = "glm", method.args = list(family = "binomial"), formula = results[[micronutrient]]$call$formula, se = FALSE) +
+        labs(title = paste("Effect of CRP and", micronutrient, "on Anemia"))
+    }
+}
+
+
+```
+
+# Aim 3
+
+
+```{r,echo=FALSE,include=FALSE}
+data<-read.csv("C:/Users/pengfei lou/Desktop/homework/2024-1/applied linear regression/pregnancy.csv")
+
+data$mstatus[is.na(data$mstatus)]<-6
+data$mstatus<-factor(data$mstatus,levels = c("0","1","2","3","4","5","6"))
+
+data<-mice(data,m=5,method = "pmm",seed = 123)
+
+data <- complete(data, 1)
+data$mstatus<-factor(data$mstatus)
+data$tpreg<-factor(data$tpreg)
+
+data <- data %>%
+  mutate(
+    hb_dl = hb / 10,
+    anemia = ifelse(hb_dl < 12, 1, 0),
+    BMI = wt / (ht / 100)^2
+  ) %>%
+  dplyr::select(-ht, -wt, -hb, -hb_dl) 
+
+data$crp <- log(data$crp+1)
+data$sf <- log(data$sf+1)
+data$sfo <- log(data$sfo+1)
+data$si<-log(data$si+1)
+data$vitb12<-log(data$vitb12+1)
+data$age_yr<-log(data$age_yr+1)
+data$gagewks<-log(data$gagewks+1)
+data$BMI<-log(data$BMI+1)
+
+data_anemia<-data%>%
+  filter(anemia==1)
+data_no_anemia<-data%>%
+  filter(anemia==0)
+
+times<-nrow(data_no_anemia)/nrow(data_anemia)
+
+data_anemia_upsampled<-data_anemia[rep(1:nrow(data_anemia),each=ceiling(times)),]
+
+data_balanced<-rbind(data_anemia_upsampled,data_no_anemia)
+```
+
+## Stepwise model
+
+```{r,message=FALSE}
+
+model<-glm(anemia ~ si+sf+sfo+vitb12+trimester+gagewks+age_yr+crp+mstatus+tpreg+BMI,family = binomial(link="logit"),data=data_balanced)
+
+step.model =stepAIC(model, direction="both")
+```
+
+
+```{r}
+model_step<-glm(anemia ~ si + sfo + vitb12 + trimester + gagewks + mstatus + BMI,family = binomial(link="logit"),data=data_balanced)
+summary(model_step)
+
+model_best<-glm(anemia ~ si + sfo + vitb12 + trimester + gagewks ,binomial(link="logit"),data=data_balanced)
+summary(model_best)
+
+model_bad<-glm(anemia~crp + mstatus + tpreg + BMI+age_yr+sf+trimester,family = binomial(link = "logit"),data=data_balanced)
+summary(model_bad)
+
+```
+
+## Model evaluation
+
+```{r}
+
+# Calculate ROC objects
+roc_step <- roc(response = data_balanced$anemia, predictor = fitted(model_step))
+roc_best <- roc(response = data_balanced$anemia, predictor = fitted(model_best))
+roc_bad <- roc(response = data_balanced$anemia, predictor = fitted(model_bad))
+
+# Plotting all ROC curves together
+plot(roc_step, main = "Comparison of ROC Curves", col = "red", print.auc = FALSE, print.auc.y = 0.2)
+plot(roc_best, add = TRUE, col = "blue", print.auc = FALSE, print.auc.y = 0.4)
+plot(roc_bad, add = TRUE, col = "green", print.auc = FALSE, print.auc.y = 0.6)
+
+# Adding a legend to distinguish the models
+legend("bottomright", legend = c("Model Step", "Model Best", "Model Bad"), 
+       col = c("red", "blue", "green"), lwd = 2)
+
+# Printing AUC scores separately
+auc_step <- auc(roc_step)
+auc_best <- auc(roc_best)
+auc_bad <- auc(roc_bad)
+
+print(paste("AUC for Model Step:", auc_step))
+print(paste("AUC for Model Best:", auc_best))
+print(paste("AUC for Model Bad:", auc_bad))
+
+```
+
+it seems like the stepwise model is still the best model.
+
+```{r}
+glmtoolbox::hltest(model_step)
+glmtoolbox::hltest(model_best)
+glmtoolbox::hltest(model_bad)
+```
+
+These models fit well.
+
+## Alternative way
+
+### Feature selection
+
+```{r,echo=FALSE,include=FALSE}
+data<-read.csv("C:/Users/pengfei lou/Desktop/homework/2024-1/applied linear regression/pregnancy.csv")
+
+data$mstatus[is.na(data$mstatus)]<-6
+#data$mstatus<-factor(data$mstatus,levels = c("0","1","2","3","4","5","6"))
+
+
+data<-mice(data,m=5,method = "pmm",seed = 123)
+
+data <- complete(data, 1)
+
+data <- data %>%
+  mutate(
+    hb_dl = hb / 10,
+    anemia = ifelse(hb_dl < 12, 1, 0),
+    BMI = wt / (ht / 100)^2
+  ) %>%
+  dplyr::select(-ht, -wt, -hb, -hb_dl,-subjid) 
+
+data$crp <- log(data$crp+1)
+data$sf <- log(data$sf+1)
+data$sfo <- log(data$sfo+1)
+data$si<-log(data$si+1)
+data$vitb12<-log(data$vitb12+1)
+data$age_yr<-log(data$age_yr+1)
+data$gagewks<-log(data$gagewks+1)
+data$BMI<-log(data$BMI+1)
+
+data_anemia<-data%>%
+  filter(anemia==1)
+data_no_anemia<-data%>%
+  filter(anemia==0)
+
+times<-nrow(data_no_anemia)/nrow(data_anemia)
+
+data_anemia_upsampled<-data_anemia[rep(1:nrow(data_anemia),each=ceiling(times)),]
+
+data_balanced<-rbind(data_anemia_upsampled,data_no_anemia)
+
+```
+
+
+```{r}
+
+data_balanced$anemia <- factor(data_balanced$anemia, levels = c(0, 1))
+
+set.seed(123) 
+index <- createDataPartition(data_balanced$anemia, p = 0.8, list = FALSE)
+train_data <- data_balanced[index, ]
+test_data <- data_balanced[-index, ]
+
+set.seed(7) # For reproducibility
+outcomeVar <- "anemia"
+predictorVars <- setdiff(names(train_data), outcomeVar)
+
+# Define the control using a repeated cross-validation approach
+control <- rfeControl(functions = rfFuncs, method = "cv", number = 10)
+
+# Run the RFE algorithm
+results <- rfe(train_data[, predictorVars], train_data[, outcomeVar],
+               sizes = c(1:length(predictorVars)), rfeControl = control)
+
+# Summarize the results
+print(results)
+
+# List the chosen features
+chosen_predictors <- predictors(results)
+print(chosen_predictors)
+
+# Plot the RFE performance
+plot(results, type = c("g", "o"))
+
+
+#control <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid")
+
+# Train the model with variable selection using LASSO
+#set.seed(7)
+#model <- train(anemia ~ si+sf+sfo+vitb12+trimester+gagewks+age_yr+crp+mstatus+tpreg+BMI, data=train_data,method="glmnet",trControl=control,tuneLength=5,family="binomial")
+# Check the results
+#print(model)
+#plot(varImp(model), top=11)
+```
+
+The max number of the model should be 9 and top 5 variables are  si, sfo, sf, vitb12, gagewks.
+
+```{r}
+set.seed(123)
+index <- createDataPartition(data_balanced$anemia, p = 0.8, list = FALSE)
+train_data <- data_balanced[index, ]
+test_data <- data_balanced[-index, ]
+
+# Ensure the outcome variable is a factor with appropriate levels
+train_data$anemia <- factor(train_data$anemia, levels = c(0, 1))
+
+# Fit a logistic regression model to the training data
+model <- glm(anemia ~ si+sfo+sf+vitb12+gagewks+crp+age_yr+BMI+mstatus, 
+             family = binomial(link = "logit"), data = train_data)
+
+# Obtain predicted probabilities from the model
+train_predictions_model <- predict(model, type = "response", newdata = train_data)
+
+# Convert probabilities to binary class predictions
+train_predicted_class <- ifelse(train_predictions_model > 0.5, 1, 0)
+train_predicted_class <- factor(train_predicted_class, levels = c(0, 1))
+
+# Generate a confusion matrix to see how well the model performs on the training data
+confusion_matrix <- confusionMatrix(train_predicted_class, train_data$anemia)
+print(confusion_matrix)
+
+
+```
+
+
+```{r}
+set.seed(123)
+# Ensure consistent use of dataset
+index <- createDataPartition(data_balanced$anemia, p = 0.8, list = FALSE)
+train_data <- data_balanced[index, ]
+test_data <- data_balanced[-index, ]
+
+# Ensure the outcome variable in the test data is a factor
+test_data$anemia <- factor(test_data$anemia, levels = c(0, 1))
+
+test_predictions_model <- predict(model, type = "response", newdata = test_data)
+
+# Convert probabilities to binary class predictions and factorize
+test_predicted_class <- ifelse(test_predictions_model > 0.5, 1, 0)
+test_predicted_class <- factor(test_predicted_class, levels = c(0, 1))
+
+# Evaluate the model performance on the test data
+conf_matrix <- confusionMatrix(test_predicted_class, test_data$anemia)
+print(conf_matrix)
+
+```
+
+
+```{r}
+set.seed(123)
+index <- createDataPartition(data_balanced$anemia, p = 0.8, list = FALSE)
+train_data <- data_balanced[index, ]
+test_data <- data_balanced[-index, ]
+
+# Ensure the outcome variable is a factor with appropriate levels
+train_data$anemia <- factor(train_data$anemia, levels = c(0, 1))
+
+# Fit a logistic regression model to the training data
+model_step<-glm(anemia ~ si + sfo + vitb12 + trimester + gagewks + mstatus + BMI,family = binomial(link="logit"),data=train_data)
+
+# Obtain predicted probabilities from the model
+train_predictions_step <- predict(model_step, type = "response", newdata = train_data)
+
+# Convert probabilities to binary class predictions
+train_predicted_class <- ifelse(train_predictions_step > 0.5, 1, 0)
+train_predicted_class <- factor(train_predicted_class, levels = c(0, 1))
+
+# Generate a confusion matrix to see how well the model performs on the training data
+confusion_matrix <- confusionMatrix(train_predicted_class, train_data$anemia)
+print(confusion_matrix)
+
+
+```
+
+
+
+```{r}
+set.seed(123)
+# Ensure consistent use of dataset
+index <- createDataPartition(data_balanced$anemia, p = 0.8, list = FALSE)
+train_data <- data_balanced[index, ]
+test_data <- data_balanced[-index, ]
+
+# Ensure the outcome variable in the test data is a factor
+test_data$anemia <- factor(test_data$anemia, levels = c(0, 1))
+
+# Assuming 'model' is already trained using train_data as shown in previous examples
+test_predictions_step <- predict(model_step, type = "response", newdata = test_data)
+
+# Convert probabilities to binary class predictions and factorize
+test_predicted_class <- ifelse(test_predictions_step > 0.5, 1, 0)
+test_predicted_class <- factor(test_predicted_class, levels = c(0, 1))
+
+# Evaluate the model performance on the test data
+conf_matrix <- confusionMatrix(test_predicted_class, test_data$anemia)
+print(conf_matrix)
+```
+
+### AUC and ROC for train
+
+```{r}
+# ROC and AUC for model
+roc_obj1 <- roc(response = train_data$anemia, predictor = train_predictions_model)
+auc_value1 <- auc(roc_obj1)
+
+# ROC and AUC for model_step
+roc_obj2 <- roc(response = train_data$anemia, predictor = train_predictions_step)
+auc_value2 <- auc(roc_obj2)
+
+# Print AUC values
+print(paste("AUC for Model :", auc_value1))
+print(paste("AUC for Model_step:", auc_value2))
+
+# Plot both ROC curves on the same plot
+plot(roc_obj1, main="ROC Curve Comparison-train", col="red", print.auc=TRUE, print.auc.y=0.4)
+plot(roc_obj2, add=TRUE, col="blue", print.auc=TRUE, print.auc.y=0.3)
+
+# Adding a legend to distinguish the models
+legend("bottomright", legend=c("Model ", "Model_step"), col=c("red", "blue"), lwd=2)
+```
+
+### AUC and ROC for test
+```{r}
+
+# ROC and AUC for model
+roc_obj1 <- roc(response = test_data$anemia, predictor = test_predictions_model)
+auc_value1 <- auc(roc_obj1)
+
+# ROC and AUC for model_step
+roc_obj2 <- roc(response = test_data$anemia, predictor = test_predictions_step)
+auc_value2 <- auc(roc_obj2)
+
+# Print AUC values
+print(paste("AUC for Model :", auc_value1))
+print(paste("AUC for Model_step:", auc_value2))
+
+# Plot both ROC curves on the same plot
+plot(roc_obj1, main="ROC Curve Comparison-test", col="red", print.auc=TRUE, print.auc.y=0.4)
+plot(roc_obj2, add=TRUE, col="blue", print.auc=TRUE, print.auc.y=0.3)
+
+# Adding a legend to distinguish the models
+legend("bottomright", legend=c("Model ", "Model_step"), col=c("red", "blue"), lwd=2)
+
+```
+
+```{r}
+glmtoolbox::hltest(model)
+
+glmtoolbox::hltest(model_step)
+
+```
+The model-glm(anemia ~ si+sfo+sf+vitb12+gagewks+crp+age_yr+BMI+mstatus) turns out to be the best model for it has higer AUC socre in test performance and max number of variables in the model is 9. 
+Both models fit well.
+
+
+
+
+
+
+
+
+
+
